@@ -394,3 +394,17 @@ def test_config_override_is_honored(tmp_path: Path) -> None:
     assert blob_cfg.root == root  # the anchor is still the workspace, not the config
     assert not (root / "config.toml").exists()
     assert wc.read_identity(ws).storage_service == "acme"
+
+
+def test_crlf_config_round_trips_without_doubling_carriage_returns(tmp_path: Path) -> None:
+    """``workspace create`` on Windows wrote CR CR LF and refused its own
+    file; a CRLF config must come back without a doubled carriage return and
+    still parse (the splice adds its own lines with bare LF, as on Linux)."""
+    ws = _ws(tmp_path, f'[storage]\nprovider = "{LOCAL}"\n')
+    # Seed the CRLF bytes directly: Path.write_text would translate them on Windows.
+    ws.config_path.write_bytes(f'[storage]\r\nprovider = "{LOCAL}"\r\n'.encode())
+    ws = _reopen(ws)
+    wc.write_identity(ws, workspace_id="ws_a", name="W", organization="Acme")
+    raw = ws.config_path.read_bytes()
+    assert b"\r\r" not in raw
+    assert wc.read_identity(ws).organization == "Acme"

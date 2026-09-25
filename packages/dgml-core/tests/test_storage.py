@@ -466,4 +466,14 @@ def test_atomic_text_writers_switch_off_newline_translation(
     monkeypatch.setattr(Path, "write_text", _spy)
     write_text_atomic(tmp_path / "a.txt", "x\n")
     storage_local._write_text_atomic(tmp_path / "b.txt", "y\n")
-    assert seen == ["", ""]
+    write_json_atomic(tmp_path / "c.json", {"k": 1})
+    assert seen == ["", "", ""]
+
+
+def test_write_json_atomic_writes_bare_lf(tmp_path: Path) -> None:
+    """The JSON writer puts down the LF it renders, not the platform's line ending."""
+    path = tmp_path / "stats.json"
+    write_json_atomic(path, {"k": [1, 2]})
+    raw = path.read_bytes()
+    assert b"\r" not in raw
+    assert raw.endswith(b"}\n")

@@ -495,7 +495,9 @@ def write_json_atomic(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    tmp.write_text(text, encoding="utf-8")
+    # newline="" for the same reason as write_text_atomic: every atomic writer puts
+    # down the text's own line endings on every platform.
+    tmp.write_text(text, encoding="utf-8", newline="")
     tmp.replace(path)
 
 

@@ -2907,22 +2907,20 @@ subtitle =
 _ANTHROPIC_VALUES_MODEL = "anthropic/claude-sonnet-5"
 
 
-def _seed_rendered_page(workspace: Workspace, fid: str) -> str:
+def _seed_rendered_page(
+    workspace: Workspace, fid: str, *, words: list[dict[str, Any]] | None = None
+) -> str:
     """A one-page file with a real 300 x 200 PNG render, two OCR words inside
-    it, and a docset whose schema declares ``title`` and ``subtitle``."""
+    it (or the ``words`` given), and a docset whose schema declares ``title``
+    and ``subtitle``."""
     import io
 
     from PIL import Image
 
     _seed_file(workspace, fid)
-    _seed_page_text(
-        workspace,
-        fid,
-        page=1,
-        width=300,
-        height=200,
-        words=[{"t": "Hello", "l": [30, 20, 80, 40]}, {"t": "world", "l": [90, 20, 150, 40]}],
-    )
+    if words is None:
+        words = [{"t": "Hello", "l": [30, 20, 80, 40]}, {"t": "world", "l": [90, 20, 150, 40]}]
+    _seed_page_text(workspace, fid, page=1, width=300, height=200, words=words)
     buf = io.BytesIO()
     Image.new("RGB", (300, 200), (10, 20, 30)).save(buf, "PNG")
     workspace.blobs.put_blob(layout.file_page_image_key(fid, 1), buf.getvalue())
@@ -3001,6 +2999,71 @@ def test_extract_values_phase3_sends_a_page_image_inside_the_vision_caps(
     assert result.values["title"]["locations"] == [
         {"page_number": 1, "bounding_box": [30, 20, 150, 40]}
     ]
+
+
+def test_extract_values_phase3_states_the_size_of_the_image_it_sends(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image size the prompt states is the frame of the pixels the model
+    reads and writes: the shrunk image's, not the render's."""
+    fid = "f1aaaaaaaaaa"
+    ds_id = _seed_rendered_page(workspace, fid)
+    monkeypatch.setattr("dgml_core.utils.VISION_MAX_EDGE", 100)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=_ANTHROPIC_VALUES_MODEL)
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            _tool_call_response(
+                "submit_values", {"values": _TWO_LEAVES_ONE_UNMATCHED}, call_id="p1"
+            ),
+            _tool_call_response("submit_locations", _ONE_BOX, call_id="p3"),
+        ],
+    ) as mock_completion:
+        extract_values(workspace, ds_id, fid, config=config)
+
+    sent, user_text = _sent_page_image(mock_completion)
+    assert sent.size == (100, 67)
+    assert "The page image is 100 x 67 pixels (width x height)." in user_text
+    assert "300 x 200" not in user_text
+
+
+def test_extract_values_phase3_grid_on_a_shrunk_page_lands_in_the_render(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page with no OCR words is asked for boxes on the 0-1000 grid. When
+    the render was shrunk to fit the caps, the grid is scaled to the image the
+    model saw (100 x 67) and that box is then moved into the render (300 x 200),
+    rounded outward; the stats count the grid page."""
+    fid = "f1aaaaaaaaaa"
+    ds_id = _seed_rendered_page(workspace, fid, words=[])
+    monkeypatch.setattr("dgml_core.utils.VISION_MAX_EDGE", 100)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=_ANTHROPIC_VALUES_MODEL)
+    grid_box = {"locations": [{"id": "a", "bounding_boxes": [[100, 50, 200, 60]]}]}
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            _tool_call_response(
+                "submit_values", {"values": _TWO_LEAVES_ONE_UNMATCHED}, call_id="p1"
+            ),
+            _tool_call_response("submit_locations", grid_box, call_id="p3"),
+        ],
+    ) as mock_completion:
+        result = extract_values(workspace, ds_id, fid, config=config)
+
+    kwargs = mock_completion.call_args_list[1].kwargs
+    assert "0-1000 grid" in kwargs["messages"][0]["content"]
+    sent, user_text = _sent_page_image(mock_completion)
+    assert sent.size == (100, 67)
+    assert "no OCR words" in user_text
+    # 0-1000 on 100 x 67 is [10, 3.35, 20, 4.02] -> [10, 3, 20, 4] in the sent
+    # image; back into 300 x 200 (x3, x200/67), rounded outward: [30, 8, 60, 12].
+    assert result.values["title"]["locations"] == [
+        {"page_number": 1, "bounding_box": [30, 8, 60, 12]}
+    ]
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    phase3 = stats["phases"]["phase3"]
+    assert (phase3["grid_pages"], phase3["boxes_dropped"]) == (1, 0)
 
 
 def test_extract_values_phase3_sends_the_full_render_to_a_non_anthropic_model(

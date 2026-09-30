@@ -63,13 +63,16 @@ jobs:
     # machine, so the job exists to make that class of break show up in CI.
     # Failures here are triaged into issues rather than failing the PR until
     # the suite is known green on this runner, at which point the
-    # continue-on-error comes off. Ghostscript is not installed: the tests
-    # that need it carry the needs_gs marker and skip cleanly without it.
+    # continue-on-error comes off. Ghostscript is installed the way the Linux
+    # job installs it: the first run without it showed seven test_pages cases
+    # that are parametrized over the renderer without the needs_gs marker.
     name: Test (Windows, Python 3.12, non-blocking)
     runs-on: windows-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - name: Install ghostscript
+        run: choco install ghostscript --no-progress -y
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true

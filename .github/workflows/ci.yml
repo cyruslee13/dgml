@@ -57,6 +57,27 @@ jobs:
           UV_PYTHON: ${{ matrix.python-version }}
       - run: uv run pytest
 
+  test-windows:
+    # Non-blocking: this is the suite's first run on Windows. The two Windows
+    # fixes merged so far (#176, #178) were only visible from a Windows
+    # machine, so the job exists to make that class of break show up in CI.
+    # Failures here are triaged into issues rather than failing the PR until
+    # the suite is known green on this runner, at which point the
+    # continue-on-error comes off. Ghostscript is not installed: the tests
+    # that need it carry the needs_gs marker and skip cleanly without it.
+    name: Test (Windows, Python 3.12, non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --dev --locked
+        env:
+          UV_PYTHON: "3.12"
+      - run: uv run pytest
+
   storage-parity:
     # The sample S3+Mongo store, run against real backing services.
     #

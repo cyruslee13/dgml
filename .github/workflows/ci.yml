@@ -73,6 +73,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install ghostscript
         run: choco install ghostscript --no-progress -y
+      - name: Put ghostscript on PATH
+        # The package installs under C:\Program Files\gs\gs<version>\bin and
+        # later steps do not see the installer's PATH change on their own.
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem 'C:\Program Files\gs' -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          "$($bin.FullName)\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true

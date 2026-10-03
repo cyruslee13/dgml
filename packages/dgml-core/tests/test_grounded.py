@@ -3279,6 +3279,8 @@ def test_extract_values_phase3_fails_the_page_it_cannot_fit_before_any_phase3_ca
         with pytest.raises(ValuesExtractionFailed, match="phase 3 page 1: over the cap"):
             extract_values(workspace, ds_id, fid, config=config)
     assert mock_completion.call_count == 1  # phase 1 only
+
+
 def test_pdf_bytes_reads_a_source_stored_with_an_uppercase_suffix(
     workspace: Workspace, sample_pdf: Path
 ) -> None:

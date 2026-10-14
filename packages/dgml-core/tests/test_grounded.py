@@ -154,6 +154,64 @@ def _png_header(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + ihdr + b"\x00" * 4
 
 
+class _StreamableResponse(SimpleNamespace):
+    """Completion-shaped test response that also yields real LiteLLM chunks."""
+
+    def __iter__(self) -> Any:
+        from litellm.types.utils import (
+            ChatCompletionDeltaToolCall,
+            Delta,
+            Function,
+            ModelResponseStream,
+            StreamingChoices,
+            Usage,
+        )
+
+        choice = self.choices[0]
+        message = choice.message
+        tool_calls = [
+            ChatCompletionDeltaToolCall(
+                index=index,
+                id=call.id,
+                type="function",
+                function=Function(
+                    name=call.function.name,
+                    arguments=call.function.arguments,
+                ),
+            )
+            for index, call in enumerate(message.tool_calls or [])
+        ]
+        yield ModelResponseStream(
+            id="test-stream",
+            model="gpt-4o",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(
+                        content=message.content,
+                        tool_calls=tool_calls or None,
+                        reasoning_content=getattr(message, "reasoning_content", None),
+                    ),
+                    finish_reason=getattr(choice, "finish_reason", None),
+                )
+            ],
+        )
+        usage = getattr(self, "usage", None)
+        if usage is not None:
+            yield ModelResponseStream(
+                id="test-stream",
+                model="gpt-4o",
+                choices=[],
+                usage=Usage(
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    total_tokens=usage.total_tokens,
+                    cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", None),
+                    cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", None),
+                ),
+            )
+
+
 def _tool_call_response(
     name: str,
     arguments: dict[str, Any],
@@ -164,7 +222,7 @@ def _tool_call_response(
     completion_tokens: int | None = None,
     cache_read_tokens: int | None = None,
     cache_creation_tokens: int | None = None,
-) -> SimpleNamespace:
+) -> _StreamableResponse:
     """A litellm-shaped completion response with one tool call.
 
     Cost/token fields are optional — when set they get plumbed through
@@ -177,7 +235,7 @@ def _tool_call_response(
         function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
     )
     msg = SimpleNamespace(content=None, tool_calls=[call])
-    response = SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+    response = _StreamableResponse(choices=[SimpleNamespace(message=msg)])
     if cost_usd is not None:
         response._hidden_params = {"response_cost": cost_usd}
     has_cache = cache_read_tokens is not None or cache_creation_tokens is not None
@@ -195,13 +253,13 @@ def _tool_call_response(
     return response
 
 
-def _truncated_response() -> SimpleNamespace:
+def _truncated_response() -> _StreamableResponse:
     """A turn that stopped with finish_reason='length' mid-tool-call."""
     call = SimpleNamespace(
         id="trunc",
         function=SimpleNamespace(name="submit_values", arguments='{"values": {"Bi'),
     )
-    return SimpleNamespace(
+    return _StreamableResponse(
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(content=None, tool_calls=[call]), finish_reason="length"
@@ -215,9 +273,9 @@ def _no_tool_call_response(
     finish_reason: str | None = None,
     *,
     reasoning_content: str | None = None,
-) -> SimpleNamespace:
+) -> _StreamableResponse:
     msg = SimpleNamespace(content=content, tool_calls=[], reasoning_content=reasoning_content)
-    return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason=finish_reason)])
+    return _StreamableResponse(choices=[SimpleNamespace(message=msg, finish_reason=finish_reason)])
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +773,7 @@ def test_generate_schema_omits_reasoning_for_anthropic(workspace: Workspace) -> 
     with patch("litellm.completion", return_value=response) as m:
         generate_schema(workspace, ["f1aaaaaaaaaa"], config=anthropic_cfg, docset_name="D")
     assert "reasoning_effort" not in m.call_args.kwargs
+    assert "stream" not in m.call_args.kwargs
 
     # Gemini — kept.
     gemini_cfg = GroundedConfig(
@@ -748,6 +807,7 @@ def test_extract_values_drops_temperature_for_anthropic(
     phase1_kwargs = m.call_args_list[0].kwargs
     assert phase1_kwargs["reasoning_effort"] == "medium"
     assert "temperature" not in phase1_kwargs
+    assert phase1_kwargs["stream"] is True
 
     gemini_cfg = GroundedConfig(
         schema_model=DEFAULT_SCHEMA_MODEL, values_model="gemini/gemini-2.5-pro"
@@ -757,6 +817,7 @@ def test_extract_values_drops_temperature_for_anthropic(
     phase1_kwargs = m.call_args_list[0].kwargs
     assert phase1_kwargs["reasoning_effort"] == "medium"
     assert phase1_kwargs["temperature"] == 0.0
+    assert phase1_kwargs["stream"] is True
 
 
 def test_lower_values_budget_does_not_reach_location_grounding(workspace: Workspace) -> None:
@@ -828,6 +889,8 @@ def test_configured_values_effort_reaches_value_extraction_only(workspace: Works
     phase1, phase3 = _extract_with_grounding_call(workspace, config)
     assert phase1.kwargs["reasoning_effort"] == "low"
     assert phase3.kwargs["reasoning_effort"] == "high"
+    assert phase1.kwargs["stream"] is True
+    assert phase3.kwargs["stream"] is True
 
 
 def test_values_effort_default_sends_no_reasoning_effort(workspace: Workspace) -> None:
@@ -1338,6 +1401,7 @@ def test_extract_values_phase3_zero_size_keeps_the_pixel_prompt(workspace: Works
 
 def test_extract_values_phase3_merges_costs_across_parallel_pages(
     workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phase 3 spawns one LLM call per page in a ThreadPoolExecutor and
     merges per-page totals after the join. This test seeds two pages of
@@ -1361,6 +1425,8 @@ def test_extract_values_phase3_merges_costs_across_parallel_pages(
     # id namespace resets per page (matching.py:551).
     phase3_args = {"locations": [{"id": "a", "bounding_boxes": [[10.0, 20.0, 30.0, 40.0]]}]}
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    costs = iter([0.01, 0.02, 0.04])
+    monkeypatch.setattr("litellm.completion_cost", lambda **_kwargs: next(costs))
     with patch(
         "litellm.completion",
         side_effect=[
@@ -2007,7 +2073,9 @@ def test_generate_schema_no_usage_recording_without_debug(workspace: Workspace) 
     assert read_events(workspace) == []
 
 
-def test_extract_values_records_one_event_summing_across_turns(workspace: Workspace) -> None:
+def test_extract_values_records_one_event_summing_across_turns(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A 3-phase extraction produces a SINGLE usage event summing
     cost/tokens across phase 1 + phase 3 (phase 2 is code-only)."""
     from dgml_core.usage import read_events
@@ -2033,6 +2101,8 @@ def test_extract_values_records_one_event_summing_across_turns(workspace: Worksp
     p3.usage = SimpleNamespace(prompt_tokens=600, completion_tokens=80, total_tokens=680)
 
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    costs = iter([0.002, 0.003])
+    monkeypatch.setattr("litellm.completion_cost", lambda **_kwargs: next(costs))
     with patch("litellm.completion", side_effect=[p1, p3]):
         extract_values(workspace, ds_id, fid, config=config, debug=True)
 
@@ -2052,6 +2122,7 @@ def test_extract_values_records_one_event_summing_across_turns(workspace: Worksp
 
 def test_extract_values_records_error_event_when_max_iters_exceeded(
     workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from dgml_core.usage import read_events
 
@@ -2069,6 +2140,7 @@ def test_extract_values_records_error_event_when_max_iters_exceeded(
         values_model=DEFAULT_VALUES_MODEL,
         max_tool_iters=3,
     )
+    monkeypatch.setattr("litellm.completion_cost", lambda **_kwargs: 0.001)
     with patch("litellm.completion", side_effect=[r, r, r]):
         with pytest.raises(ValuesExtractionFailed, match="max_tool_iters"):
             extract_values(workspace, ds_id, fid, config=config, debug=True)
@@ -2641,7 +2713,7 @@ def test_extract_values_truncated_output_reports_length(workspace: Workspace) ->
         function=SimpleNamespace(name="submit_values", arguments='{"values": {"tr'),
     )
     msg = SimpleNamespace(content=None, tool_calls=[call])
-    truncated = SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="length")])
+    truncated = _StreamableResponse(choices=[SimpleNamespace(message=msg, finish_reason="length")])
 
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", return_value=truncated):
@@ -2880,7 +2952,7 @@ def test_extract_values_truncation_retries_with_chunk_directive(workspace: Works
     call = SimpleNamespace(
         id="t1", function=SimpleNamespace(name="submit_values", arguments='{"values": {"Bi')
     )
-    truncated = SimpleNamespace(
+    truncated = _StreamableResponse(
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(content=None, tool_calls=[call]), finish_reason="length"
@@ -3083,6 +3155,7 @@ def test_schema_gen_never_cached(workspace: Workspace) -> None:
     with patch("litellm.completion", return_value=response) as m:
         generate_schema(workspace, [fid], config=config, docset_name="D")
     assert _cache_control_paths(m.call_args_list[0].kwargs["messages"]) == []
+    assert "stream" not in m.call_args_list[0].kwargs
 
 
 def test_phase3_never_cached(workspace: Workspace) -> None:

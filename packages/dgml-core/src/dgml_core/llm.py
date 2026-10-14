@@ -370,6 +370,9 @@ class LLMConfig:
     ``max_completion_tokens`` is the newer field grounded extraction
     paths prefer (it's what GPT-5 / o-series accept). Set whichever the
     target provider expects.
+
+    When ``stream`` is true, chunks are rebuilt into one response so a long
+    call is not dropped by an idle socket; nothing else about the call changes.
     """
 
     model: str
@@ -383,6 +386,7 @@ class LLMConfig:
     max_tokens: int | None = 16000
     max_completion_tokens: int | None = None
     timeout: float | None = None
+    stream: bool = False
     reasoning_effort: str | None = None
     # Anthropic extended thinking; one of :data:`ANTHROPIC_THINKING_MODES`.
     # ``None`` means "don't send the field" and therefore leaves the model's own
@@ -791,6 +795,10 @@ def _build_completion_kwargs(
         )
     if config.timeout is not None:
         kwargs["timeout"] = config.timeout
+    if config.stream:
+        kwargs["stream"] = True
+        if is_openai_model(config.model):
+            kwargs["stream_options"] = {"include_usage": True}
     if config.api_key:
         kwargs["api_key"] = config.api_key
     if config.api_base:
@@ -972,6 +980,8 @@ def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> A
     """Call litellm.completion with exponential-backoff retries for transient
     failures — both raised errors and *empty* responses.
 
+    Streamed calls are consumed and rebuilt before the same response checks run.
+
     A successful call can still come back with an empty ``choices`` list (zero
     candidates, zero completion tokens): observed intermittently with Gemini via
     litellm, and transient — an immediate retry clears it. Left unhandled it
@@ -988,6 +998,31 @@ def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> A
         try:
             with _quiet_stdout():
                 response = litellm.completion(**kwargs)
+                if kwargs.get("stream"):
+                    chunks = list(response)
+                    response = litellm.stream_chunk_builder(chunks, messages=kwargs.get("messages"))
+                    if response is not None:
+                        hidden = getattr(response, "_hidden_params", None)
+                        existing_cost = (
+                            hidden.get("response_cost") if isinstance(hidden, dict) else None
+                        )
+                        has_cost = isinstance(existing_cost, int | float) and not isinstance(
+                            existing_cost, bool
+                        )
+                        if not has_cost:
+                            try:
+                                cost = litellm.completion_cost(
+                                    completion_response=response,
+                                    model=kwargs.get("model"),
+                                )
+                            except Exception:
+                                pass
+                            else:
+                                if isinstance(cost, int | float) and not isinstance(cost, bool):
+                                    if not isinstance(hidden, dict):
+                                        hidden = {}
+                                        response._hidden_params = hidden
+                                    hidden["response_cost"] = float(cost)
         except Exception as exc:
             msg = str(exc).lower()
             # Retry on transient network/server errors only. Rate limits count:

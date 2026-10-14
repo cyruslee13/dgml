@@ -410,6 +410,195 @@ def _tool_resp() -> Any:
     )
 
 
+def _tool_stream(*, content: str = "working") -> list[Any]:
+    """Real LiteLLM chunks for one text delta and one fragmented tool call."""
+    from litellm.types.utils import (
+        ChatCompletionDeltaToolCall,
+        Delta,
+        Function,
+        ModelResponseStream,
+        StreamingChoices,
+        Usage,
+    )
+
+    return [
+        ModelResponseStream(
+            id="stream-1",
+            model="gpt-4o",
+            choices=[StreamingChoices(index=0, delta=Delta(content=content))],
+        ),
+        ModelResponseStream(
+            id="stream-1",
+            model="gpt-4o",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(
+                        tool_calls=[
+                            ChatCompletionDeltaToolCall(
+                                index=0,
+                                id="call-1",
+                                type="function",
+                                function=Function(name="submit_values"),
+                            )
+                        ]
+                    ),
+                )
+            ],
+        ),
+        ModelResponseStream(
+            id="stream-1",
+            model="gpt-4o",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(
+                        tool_calls=[
+                            ChatCompletionDeltaToolCall(
+                                index=0,
+                                function=Function(arguments='{"values":'),
+                            )
+                        ]
+                    ),
+                )
+            ],
+        ),
+        ModelResponseStream(
+            id="stream-1",
+            model="gpt-4o",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(
+                        tool_calls=[
+                            ChatCompletionDeltaToolCall(
+                                index=0,
+                                function=Function(arguments='{"title":"hello"}}'),
+                            )
+                        ]
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+        ),
+        ModelResponseStream(
+            id="stream-1",
+            model="gpt-4o",
+            choices=[],
+            usage=Usage(prompt_tokens=21, completion_tokens=8, total_tokens=29),
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model", "stream", "expected_options"),
+    [
+        ("gpt-4o", True, {"include_usage": True}),
+        ("anthropic/claude-haiku-4-5", True, None),
+        ("gemini/gemini-2.5-pro", True, None),
+        ("gpt-4o", False, None),
+    ],
+)
+def test_build_completion_kwargs_stream_fields(
+    model: str, stream: bool, expected_options: dict[str, bool] | None
+) -> None:
+    kwargs = llm._build_completion_kwargs(
+        llm.LLMConfig(model=model, stream=stream),
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+    assert kwargs.get("stream") is (True if stream else None)
+    if expected_options is None:
+        assert "stream_options" not in kwargs
+    else:
+        assert kwargs["stream_options"] == expected_options
+
+
+def test_call_with_tools_rebuilds_streamed_text_tool_call_usage_and_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    monkeypatch.setattr("litellm.completion", lambda **_kwargs: iter(_tool_stream()))
+    monkeypatch.setattr("litellm.completion_cost", lambda **_kwargs: 0.0123)
+
+    result = llm.call_with_tools(
+        llm.LLMConfig(model="gpt-4o", stream=True),
+        messages=[{"role": "user", "content": "extract"}],
+        tools=[{"type": "function", "function": {"name": "submit_values"}}],
+    )
+
+    assert result.content == "working"
+    assert len(result.tool_calls) == 1
+    tool_call = result.tool_calls[0]
+    assert tool_call.function.name == "submit_values"
+    assert json.loads(tool_call.function.arguments) == {"values": {"title": "hello"}}
+    assert result.usage["prompt_tokens"] == 21
+    assert result.usage["completion_tokens"] == 8
+    assert result.usage["total_tokens"] == 29
+    assert result.usage["cost_usd"] == pytest.approx(0.0123)
+
+    def unknown_cost(**_kwargs: Any) -> float:
+        raise RuntimeError("model is not mapped")
+
+    monkeypatch.setattr("litellm.completion_cost", unknown_cost)
+    unpriced = llm.call_with_tools(
+        llm.LLMConfig(model="gpt-4o", stream=True),
+        messages=[{"role": "user", "content": "extract"}],
+        tools=[{"type": "function", "function": {"name": "submit_values"}}],
+    )
+    assert unpriced.usage["cost_usd"] is None
+
+
+def test_stream_disconnect_during_iteration_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def broken_stream() -> Any:
+        chunks = _tool_stream(content="first")
+        yield chunks[0]
+        yield chunks[1]
+        raise ConnectionError("connection dropped")
+
+    def completion(**_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return broken_stream() if calls == 1 else iter(_tool_stream(content="second"))
+
+    monkeypatch.setattr("litellm.completion", completion)
+    monkeypatch.setattr("litellm.completion_cost", lambda **_kwargs: 0.01)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    result = llm.call_with_tools(
+        llm.LLMConfig(model="gpt-4o", stream=True),
+        messages=[{"role": "user", "content": "extract"}],
+        tools=[{"type": "function", "function": {"name": "submit_values"}}],
+    )
+
+    assert calls == 2
+    assert result.content == "second"
+
+
+def test_empty_stream_retries_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def completion(**_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return iter(())
+
+    monkeypatch.setattr("litellm.completion", completion)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(llm.EmptyModelResponse, match="model returned no choices after 3 attempts"):
+        llm._completion_with_retry({"model": "gpt-4o", "messages": [], "stream": True})
+
+    assert calls == 3
+
+
 def _extraction_messages() -> list[dict[str, Any]]:
     """A phase-1-shaped tool-call message list: string system + [schema, PDF]."""
     return [

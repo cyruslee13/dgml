@@ -205,6 +205,7 @@ _PHASE3_GRID_REASONING_EFFORT = "medium"
 # at ~13min on a 7-page ledger with reasoning=high). 30 min gives
 # the model room to think through a long table without us cutting
 # the connection.
+# The phase-1 values and phase-3 grounding calls stream to avoid idle socket drops (#189).
 _DEFAULT_TIMEOUT_SECONDS = 1800
 
 # Default number of files the schema-generation step samples from a
@@ -1627,6 +1628,7 @@ def _phase3_call_for_page(
         max_completion_tokens=_DEFAULT_MAX_COMPLETION_TOKENS,
         temperature=_DEFAULT_VALUES_TEMPERATURE,
         timeout=_DEFAULT_TIMEOUT_SECONDS,
+        stream=True,
         reasoning_effort=_PHASE3_GRID_REASONING_EFFORT if normalized else _DEFAULT_REASONING_EFFORT,
     )
     forced_tool_choice = {
@@ -2522,6 +2524,7 @@ def _run_extract_loop(
         max_completion_tokens=_DEFAULT_MAX_COMPLETION_TOKENS,
         temperature=_DEFAULT_VALUES_TEMPERATURE,
         timeout=_DEFAULT_TIMEOUT_SECONDS,
+        stream=True,
         reasoning_effort=reasoning_effort,
     )
 

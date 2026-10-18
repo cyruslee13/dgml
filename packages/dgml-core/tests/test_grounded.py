@@ -2399,7 +2399,7 @@ def test_extract_values_records_one_event_summing_across_turns(
     assert e["context"]["docset_id"] == ds_id
     # The result carries the same accounting the row does, plus the stats
     # document, so a library caller needs neither file.
-    assert result.usage["cost_usd"] == 0.005
+    assert result.usage["cost_usd"] == pytest.approx(e["cost_usd"])
     assert result.usage["prompt_tokens"] == 800
     assert result.usage["total_tokens"] == 910
     assert result.usage["duration_s"] == e["duration_s"]
@@ -2460,7 +2460,9 @@ def test_extract_values_failure_carries_usage_and_stats_on_the_error(
         with pytest.raises(ValuesExtractionFailed, match="max_tool_iters") as excinfo:
             extract_values(workspace, ds_id, fid, config=config)
     assert excinfo.value.usage is not None
-    assert excinfo.value.usage["cost_usd"] == 0.003
+    assert excinfo.value.usage["cost_usd"] == pytest.approx(
+        0.00033
+    )  # three streamed turns, priced from their tokens
     assert excinfo.value.usage["prompt_tokens"] == 300
     assert excinfo.value.stats is not None and excinfo.value.stats["outcome"] == "error"
     # Nothing persisted: both switches were off.
@@ -2543,7 +2545,12 @@ def test_extract_values_phase3_failure_still_counts_every_pages_spend(
         "subtitle": {"text": "Farewell", "locations": [{"page_number": 2}]},
     }
     p1 = _tool_call_response(
-        "submit_values", {"values": phase1_values}, call_id="p1", cost_usd=0.01, prompt_tokens=100
+        "submit_values",
+        {"values": phase1_values},
+        call_id="p1",
+        cost_usd=0.01,
+        prompt_tokens=100,
+        completion_tokens=0,
     )
     ok = _tool_call_response(
         "submit_locations",
@@ -2551,9 +2558,12 @@ def test_extract_values_phase3_failure_still_counts_every_pages_spend(
         call_id="ok",
         cost_usd=0.02,
         prompt_tokens=200,
+        completion_tokens=0,
     )
     # Billed, then rejected: an unknown tool fails the page after its usage counts.
-    bad = _tool_call_response("bogus_tool", {}, call_id="bad", cost_usd=0.04, prompt_tokens=400)
+    bad = _tool_call_response(
+        "bogus_tool", {}, call_id="bad", cost_usd=0.04, prompt_tokens=400, completion_tokens=0
+    )
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", side_effect=[p1, ok, bad]):
         with pytest.raises(ValuesExtractionFailed, match=r"phase 3 page [12]") as excinfo:
@@ -2563,14 +2573,16 @@ def test_extract_values_phase3_failure_still_counts_every_pages_spend(
 
     usage = excinfo.value.usage
     assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.07)  # phase 1 + both phase-3 pages
+    assert usage["cost_usd"] == pytest.approx(
+        0.0007
+    )  # phase 1 + both phase-3 pages, priced from tokens
     assert usage["prompt_tokens"] == 700
     (row,) = read_events(workspace)
     assert row["outcome"] == "error"
-    assert row["cost_usd"] == pytest.approx(0.07)
+    assert row["cost_usd"] == pytest.approx(0.0007)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
-    assert stats["phases"]["phase3"]["cost_usd"] == pytest.approx(0.06)
+    assert stats["phases"]["phase3"]["cost_usd"] == pytest.approx(0.0006)
     assert stats == excinfo.value.stats
 
 
@@ -2582,7 +2594,13 @@ def test_extract_values_attaches_usage_to_any_dgml_error(workspace: Workspace) -
     _seed_page_text(workspace, fid, page=1)
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
     phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
-    response = _tool_call_response("submit_values", {"values": phase1_values}, cost_usd=0.03)
+    response = _tool_call_response(
+        "submit_values",
+        {"values": phase1_values},
+        cost_usd=0.03,
+        prompt_tokens=300,
+        completion_tokens=0,
+    )
 
     def unassign_then_answer(*args: Any, **kwargs: Any) -> SimpleNamespace:
         DocSetStore(workspace).remove_file(ds_id, fid)
@@ -2593,7 +2611,9 @@ def test_extract_values_attaches_usage_to_any_dgml_error(workspace: Workspace) -
         with pytest.raises(FileNotFound, match="no longer assigned") as excinfo:
             extract_values(workspace, ds_id, fid, config=config)
     assert excinfo.value.usage is not None
-    assert excinfo.value.usage["cost_usd"] == 0.03
+    assert excinfo.value.usage["prompt_tokens"] == 300
+    assert excinfo.value.usage["completion_tokens"] == 0
+    assert excinfo.value.usage["cost_usd"] == pytest.approx(0.0003)
     assert excinfo.value.stats is not None and excinfo.value.stats["outcome"] == "error"
 
 

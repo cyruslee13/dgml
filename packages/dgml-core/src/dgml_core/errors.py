@@ -24,9 +24,8 @@ dead:
   results payload. Callers read ``TheClass.code``.
 - *CLI-layer codes* have no class at all. ``INTERNAL_ERROR`` is permanently one
   (it exists for exceptions that are *not* a :class:`DgmlError`).
-  ``EMPTY_DOCSET``, ``NO_FILES`` and ``VALUES_NOT_FOUND`` are domain
-  preconditions that become classes when their operations move out of
-  ``cli.py``.
+  ``EMPTY_DOCSET`` and ``NO_FILES`` are domain preconditions that become
+  classes when their operations move out of ``cli.py``.
 """
 
 from __future__ import annotations
@@ -43,9 +42,21 @@ if TYPE_CHECKING:
 
 
 class DgmlError(Exception):
-    """Base class for all DGML errors. Carries a stable ``code`` for the CLI."""
+    """Base class for all DGML errors. Carries a stable ``code`` for the CLI.
+
+    ``usage`` and ``stats`` are set when the error ends a value extraction
+    (:func:`dgml_core.grounded.extract_values`, and so ``extract_file`` /
+    ``add_file_and_extract``) after it may have spent money: they carry what
+    the run got done — the same shapes ``ExtractionResult.usage`` / ``.stats``
+    have on success — so a caller that persists no telemetry can still account
+    for a failed run. Both are ``None`` for every other error, and when they
+    could not be built. Errors that are not a ``DgmlError`` (a bug, a raw
+    storage exception) never carry them.
+    """
 
     code: str = "DGML_ERROR"
+    usage: dict[str, Any] | None = None
+    stats: dict[str, Any] | None = None
 
     def __reduce__(self) -> tuple[Any, ...]:
         # ``Exception.__reduce__`` rebuilds via ``cls(*args)`` — the message
@@ -380,6 +391,20 @@ class GuidanceNotFound(NotFoundError):
     code = "GUIDANCE_NOT_FOUND"
 
 
+class DgmlNotFound(NotFoundError):
+    """The file is assigned to the docset, but its ``<stem>.dgml.xml`` has not
+    been written yet (neither ``docset generate`` nor ``extraction extract`` ran)."""
+
+    code = "DGML_NOT_FOUND"
+
+
+class ValuesNotFound(NotFoundError):
+    """The pair has no extracted values (no ``dg:extraction`` element in its
+    ``<stem>.dgml.xml``) — ``extraction extract`` has not run for it."""
+
+    code = "VALUES_NOT_FOUND"
+
+
 class SchemaInvalid(DgmlError):
     code = "SCHEMA_INVALID"
 
@@ -413,6 +438,10 @@ class GenerationFailed(DgmlError):
 
 
 class ValuesExtractionFailed(DgmlError):
+    """Value extraction could not finish. Out of
+    :func:`dgml_core.grounded.extract_values` it carries the run's partial
+    ``usage`` / ``stats`` (see :class:`DgmlError`)."""
+
     code = "VALUES_EXTRACTION_FAILED"
 
 

@@ -33,12 +33,13 @@ consistent:
   continuation in those cases (see :func:`supports_assistant_prefill`), so a
   caller gets one coherent output on every provider.
 - **Usage telemetry.** The call functions record usage themselves: when a
-  config carries a ``workspace`` and ``debug`` is set, each call appends one
-  :class:`UsageEvent` to ``usage.jsonl`` (labelled by ``config.operation`` /
+  config carries a ``workspace`` and ``record_usage`` is set, each call appends
+  one :class:`UsageEvent` to ``usage.jsonl`` (labelled by ``config.operation`` /
   ``config.context``), on both success and failure. Callers don't wire this up
   per call. :func:`record_usage_for` is an optional scope that aggregates the
-  calls inside it into a single row for multi-call operations. All recording is
-  gated on ``--debug``.
+  calls inside it into a single row for multi-call operations. Recording is
+  independent of debug artifacts: the CLI turns it on under ``--debug``, a
+  library caller sets ``record_usage=True`` directly.
 - **One request protocol, one driver.** Each wrapper is defined once as a
   pure ``steps_*`` generator (yields the completion kwargs for a request,
   receives the response, decides whether another request follows) and the
@@ -432,11 +433,13 @@ class LLMConfig:
     # Recording context carried on the config so the call functions log
     # ``usage.jsonl`` rows themselves rather than each caller wrapping the call.
     # ``workspace`` is where the row is written; recording is GATED on
-    # ``debug`` (no ``--debug`` → no rows, for every operation). ``operation``
-    # and ``context`` label the row. Leave ``workspace`` None (the default)
-    # for library callers that don't want telemetry.
+    # ``record_usage`` (off → no rows, for every operation). It is deliberately
+    # not tied to debug artifacts: a production host can account for cost
+    # without writing debug files. ``operation`` and ``context`` label the
+    # row. Leave ``workspace`` None (the default) for library callers that
+    # don't want telemetry.
     workspace: Workspace | None = None
-    debug: bool = False
+    record_usage: bool = False
     operation: str | None = None
     context: dict[str, Any] | None = None
     # Pricing tier recorded on the usage row (``usage.TIER_STANDARD`` /
@@ -1503,9 +1506,9 @@ def _completion_with_retry(
 
 
 def _usage_enabled(config: LLMConfig) -> bool:
-    """Usage recording happens only under ``--debug`` and only when a
+    """Usage recording happens only when ``record_usage`` is set and a
     workspace to write to is set on the config."""
-    return config.debug and config.workspace is not None
+    return config.record_usage and config.workspace is not None
 
 
 @contextmanager
@@ -1518,7 +1521,7 @@ def _record_call(config: LLMConfig) -> Iterator[dict[str, Any]]:
     - If an aggregation scope is active (``config._usage_sink`` set by
       :func:`record_usage_for`), fold the totals into it and write nothing —
       the scope emits one combined row.
-    - Otherwise, append one :class:`UsageEvent` (gated on ``--debug`` +
+    - Otherwise, append one :class:`UsageEvent` (gated on ``record_usage`` +
       workspace). A single call therefore yields a single row — or one row
       per tier when its responses were served by more than one (see
       :func:`dgml_core.usage.scope_events`).
@@ -1540,7 +1543,7 @@ def _record_call(config: LLMConfig) -> Iterator[dict[str, Any]]:
     finally:
         if config._usage_sink is not None:
             add_partial(config._usage_sink, totals)
-        elif config.debug and config.workspace is not None:
+        elif config.record_usage and config.workspace is not None:
             event = UsageEvent(
                 at=now_iso(),
                 operation=config.operation or "llm_call",
@@ -2117,14 +2120,19 @@ def empty_usage_totals() -> dict[str, Any]:
     }
 
 
+#: Key a batch driver sets on an open :func:`record_usage_for` sink to mark the
+#: scope's row with its tier (the scope config's own ``tier`` otherwise).
+SINK_TIER_KEY = "_tier"
+
+
 @contextmanager
 def record_usage_for(config: LLMConfig) -> Iterator[None]:
     """Aggregate every LLM call made with *config* inside this block into ONE
     ``usage.jsonl`` row, instead of one row per call.
 
     Recording context (``workspace``, ``operation``, ``context``) is read off
-    the config, and the whole scope is gated on ``config.debug`` — with
-    ``--debug`` off (or no workspace) this is a transparent no-op. Use it only
+    the config, and the whole scope is gated on ``config.record_usage`` — with
+    recording off (or no workspace) this is a transparent no-op. Use it only
     for a genuinely multi-call operation (e.g. a per-page extraction loop);
     single-call sites need no wrapper — the call records its own row.
 
@@ -2132,8 +2140,9 @@ def record_usage_for(config: LLMConfig) -> Iterator[None]:
     a shared accumulator rather than each writing a row; on exit — success or
     exception — one combined :class:`UsageEvent` is appended. Its ``tier`` is
     the one that served the scope's responses (each response's tier marker,
-    else the driving config's tier), or the scope config's own when it saw no
-    response; a scope whose responses span tiers appends one row per tier
+    else the driving config's tier); a scope with no responses falls back to
+    the scope config's tier, or batch when a batch driver marked the sink via
+    ``totals[SINK_TIER_KEY]``; a scope whose responses span tiers appends one row per tier
     instead (:func:`dgml_core.usage.scope_events`). Nesting is safe:
     an inner scope defers to the outer one. The write can never break the
     caller (see :func:`record_usage`); exceptions propagate after the row.
@@ -2172,7 +2181,7 @@ def record_usage_for(config: LLMConfig) -> Iterator[None]:
                 outcome=outcome,
                 context=config.context or {},
                 error=error_msg,
-                tier=config.tier,
+                tier=str(totals.get(SINK_TIER_KEY) or config.tier),
             )
             # One row, or one per tier when the responses span tiers.
             for part in scope_events(event, totals):
@@ -2183,6 +2192,7 @@ __all__ = [
     "ANTHROPIC_MODEL_PATTERNS",
     "OPENAI_MODEL_PATTERNS",
     "PDF_NATIVE_MODEL_PATTERNS",
+    "SINK_TIER_KEY",
     "CallResult",
     "LLMConfig",
     "LLMStep",

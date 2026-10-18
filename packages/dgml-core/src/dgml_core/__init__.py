@@ -25,6 +25,7 @@ from .conversion import (
     load_conversion_config,
     make_converter,
 )
+from .dgml_output import DgmlDocument, read_dgml
 from .docsets import DocSetStore
 
 # Exported in full, and pinned so by tests/test_error_codes.py.
@@ -45,6 +46,7 @@ from .errors import (
     ConversionFailed,
     CorruptMetadata,
     DgmlError,
+    DgmlNotFound,
     DocSetNotFound,
     EmptyModelResponse,
     EngineNotAvailable,
@@ -87,6 +89,7 @@ from .errors import (
     TextExtractionFailed,
     UnsupportedFileType,
     ValuesExtractionFailed,
+    ValuesNotFound,
     WalletKeyMissing,
     WorkspaceMigrationFailed,
     WorkspaceNotFound,
@@ -96,9 +99,10 @@ from .errors import (
     WorkspacesWriteConflict,
 )
 
-# Eager: ``.extraction`` imports only docsets/errors/storage at module scope and
-# reaches ``.grounded`` → ``.llm`` inside the function, so it costs nothing here.
-from .extraction import add_file_and_extract, extract_file
+# Eager: ``.extraction`` imports only dgml_output/docsets/errors/storage at module
+# scope (all already loaded above) and reaches ``.grounded`` → ``.llm`` and
+# ``.extraction_xml`` inside the functions, so it costs nothing here.
+from .extraction import add_file_and_extract, extract_file, get_extracted_values
 from .file_attestation import (
     ArtifactKind,
     ArtifactRef,
@@ -184,6 +188,7 @@ if TYPE_CHECKING:
         load_classification_config,
     )
     from .consistency import CheckReport, Issue, check_workspace
+    from .generation.link_stage import LinkOutcome, LinkStage, StagedDocument
     from .grounded import ExtractionResult
 
 __version__ = "0.1.0"
@@ -203,6 +208,8 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 #: session (bill extraction) spend that entire budget on an unused client.
 #: Importing a submodule directly, or touching any name below, still loads it
 #: exactly as before. ``tests/test_public_api.py`` pins the invariant.
+#: The semantic-link stage is lazy for the same reason, and so that
+#: ``dgml_core.batch`` is never on the default import path.
 _LAZY_SUBMODULES = {
     "CheckReport": ".consistency",
     "ClassificationConfig": ".classification",
@@ -210,6 +217,9 @@ _LAZY_SUBMODULES = {
     "ClassifyMode": ".classification",
     "ExtractionResult": ".grounded",
     "Issue": ".consistency",
+    "LinkOutcome": ".generation.link_stage",
+    "LinkStage": ".generation.link_stage",
+    "StagedDocument": ".generation.link_stage",
     "check_workspace": ".consistency",
     "classify_file": ".classification",
     "load_classification_config": ".classification",
@@ -270,7 +280,9 @@ __all__ = [
     "ConverterConfig",
     "CorruptMetadata",
     "CreateWorkspaceResult",
+    "DgmlDocument",
     "DgmlError",
+    "DgmlNotFound",
     "DocConverter",
     "DocSet",
     "DocSetAssignment",
@@ -301,7 +313,9 @@ __all__ = [
     "Issue",
     "LabelModelUnreachable",
     "LegacyConfigPresent",
+    "LinkOutcome",
     "LinkPlanFailed",
+    "LinkStage",
     "LocalDirWorkspacesStore",
     "LocalStore",
     "Migration",
@@ -328,6 +342,7 @@ __all__ = [
     "SchemaGenerationFailed",
     "SchemaInvalid",
     "SchemaNotFound",
+    "StagedDocument",
     "Storage",
     "StorageBackendMismatch",
     "StorageConfig",
@@ -339,6 +354,7 @@ __all__ = [
     "TextMode",
     "UnsupportedFileType",
     "ValuesExtractionFailed",
+    "ValuesNotFound",
     "VerifyResult",
     "WalletKeyMissing",
     "Workspace",
@@ -367,6 +383,7 @@ __all__ = [
     "export_attestation",
     "extract_file",
     "generate_unique_workspace_id",
+    "get_extracted_values",
     "is_record_id",
     "is_workspace_id",
     "layout",
@@ -385,6 +402,7 @@ __all__ = [
     "new_workspace_id",
     "pending_migrations",
     "read_attestation",
+    "read_dgml",
     "resolve_store_configs",
     "slice_pages",
     "stamp_schema_version",

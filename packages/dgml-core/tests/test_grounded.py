@@ -2550,7 +2550,7 @@ def test_extract_values_phase3_failure_still_counts_every_pages_spend(
         call_id="p1",
         cost_usd=0.01,
         prompt_tokens=100,
-        completion_tokens=0,
+        completion_tokens=20,
     )
     ok = _tool_call_response(
         "submit_locations",
@@ -2558,11 +2558,11 @@ def test_extract_values_phase3_failure_still_counts_every_pages_spend(
         call_id="ok",
         cost_usd=0.02,
         prompt_tokens=200,
-        completion_tokens=0,
+        completion_tokens=20,
     )
     # Billed, then rejected: an unknown tool fails the page after its usage counts.
     bad = _tool_call_response(
-        "bogus_tool", {}, call_id="bad", cost_usd=0.04, prompt_tokens=400, completion_tokens=0
+        "bogus_tool", {}, call_id="bad", cost_usd=0.04, prompt_tokens=400, completion_tokens=20
     )
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", side_effect=[p1, ok, bad]):
@@ -2574,15 +2574,15 @@ def test_extract_values_phase3_failure_still_counts_every_pages_spend(
     usage = excinfo.value.usage
     assert usage is not None
     assert usage["cost_usd"] == pytest.approx(
-        0.0007
+        0.00082
     )  # phase 1 + both phase-3 pages, priced from tokens
     assert usage["prompt_tokens"] == 700
     (row,) = read_events(workspace)
     assert row["outcome"] == "error"
-    assert row["cost_usd"] == pytest.approx(0.0007)
+    assert row["cost_usd"] == pytest.approx(0.00082)
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
-    assert stats["phases"]["phase3"]["cost_usd"] == pytest.approx(0.0006)
+    assert stats["phases"]["phase3"]["cost_usd"] == pytest.approx(0.00068)
     assert stats == excinfo.value.stats
 
 
@@ -2599,7 +2599,7 @@ def test_extract_values_attaches_usage_to_any_dgml_error(workspace: Workspace) -
         {"values": phase1_values},
         cost_usd=0.03,
         prompt_tokens=300,
-        completion_tokens=0,
+        completion_tokens=20,
     )
 
     def unassign_then_answer(*args: Any, **kwargs: Any) -> SimpleNamespace:
@@ -2612,8 +2612,8 @@ def test_extract_values_attaches_usage_to_any_dgml_error(workspace: Workspace) -
             extract_values(workspace, ds_id, fid, config=config)
     assert excinfo.value.usage is not None
     assert excinfo.value.usage["prompt_tokens"] == 300
-    assert excinfo.value.usage["completion_tokens"] == 0
-    assert excinfo.value.usage["cost_usd"] == pytest.approx(0.0003)
+    assert excinfo.value.usage["completion_tokens"] == 20
+    assert excinfo.value.usage["cost_usd"] == pytest.approx(0.00034)
     assert excinfo.value.stats is not None and excinfo.value.stats["outcome"] == "error"
 
 
